@@ -3,3 +3,4 @@ uvicorn
 mysql-connector-python
 python-dotenv
 pydantic
+email-validator

@@ -131,6 +131,35 @@
     <div class="bg-shape bg-mist-300 w-80 h-80 rounded-full bottom-[-10%] left-[20%] animate-blob animation-delay-4000 opacity-40"></div>
   </div>
 
+  <!-- ============ LOGIN / REGISTER SCREEN ============ -->
+  <div id="auth-overlay" class="hidden fixed inset-0 z-[100] items-center justify-center bg-lightbg/95 backdrop-blur-sm px-4">
+    <div class="glass-panel rounded-2xl p-7 w-full max-w-sm">
+      <h1 class="text-3xl font-serif font-bold tracking-tight text-gray-900 mb-1">
+        Virtu<span class="text-mist-600 italic">Trade</span>
+      </h1>
+      <p id="auth-title" class="text-xs font-medium text-gray-500 mb-5">Log in to start trading</p>
+
+      <label class="text-[10px] uppercase font-bold tracking-widest text-gray-400" for="auth-username">Username</label>
+      <input id="auth-username" autocomplete="username" class="w-full glass-input rounded-md px-3 py-2 text-sm text-gray-800 mb-3 mt-1">
+
+      <div id="auth-email-row" class="hidden">
+        <label class="text-[10px] uppercase font-bold tracking-widest text-gray-400" for="auth-email">Email</label>
+        <input id="auth-email" type="email" autocomplete="email" class="w-full glass-input rounded-md px-3 py-2 text-sm text-gray-800 mb-3 mt-1">
+      </div>
+
+      <label class="text-[10px] uppercase font-bold tracking-widest text-gray-400" for="auth-password">Password</label>
+      <input id="auth-password" type="password" autocomplete="current-password" class="w-full glass-input rounded-md px-3 py-2 text-sm text-gray-800 mb-4 mt-1">
+
+      <button id="auth-submit" onclick="submitAuth()" class="glass-btn w-full bg-gradient-to-r from-mist-500 to-mist-600 hover:from-mist-400 hover:to-mist-500 text-white text-sm font-bold py-2.5 rounded-md shadow-md shadow-mist-500/20 active:scale-95">
+        Log in
+      </button>
+      <p id="auth-msg" class="text-xs font-semibold text-red-500 mt-3 min-h-[16px]"></p>
+      <button id="auth-toggle" onclick="toggleAuthMode()" class="text-xs font-semibold text-mist-600 hover:text-mist-800 mt-1">
+        New here? Create an account
+      </button>
+    </div>
+  </div>
+
   <header class="sticky top-0 z-50 glass-panel rounded-none border-t-0 border-l-0 border-r-0 border-b border-white/60 px-6 py-4 mb-8">
     <div class="max-w-[1400px] mx-auto flex flex-col md:flex-row md:items-center justify-between gap-6">
       
@@ -157,26 +186,18 @@
 
       <div class="flex flex-col sm:flex-row sm:items-center gap-4">
         
-        <!-- Active Trader Dropdown -->
+        <!-- Signed-in account -->
         <div class="glass-panel rounded-xl p-2.5 px-4 shadow-sm border border-white/80">
           <div class="flex items-center justify-between gap-4 mb-1.5">
-            <label class="text-[10px] uppercase font-bold tracking-widest text-gray-400">Operating As</label>
+            <label class="text-[10px] uppercase font-bold tracking-widest text-gray-400">Signed in as</label>
             <div id="cash" class="text-xs font-bold text-green-600 bg-green-50 px-2 py-0.5 rounded border border-green-100"></div>
           </div>
-          <select id="user-select" class="w-full glass-input rounded-md px-2 py-1.5 text-sm font-semibold text-gray-800 cursor-pointer"></select>
-        </div>
-
-        <!-- Add Trader Panel -->
-        <div class="glass-panel rounded-xl p-2.5 px-4 shadow-sm border border-white/80 flex flex-col justify-center">
-          <label class="text-[10px] uppercase font-bold tracking-widest text-gray-400 mb-1.5">New Account Desk</label>
-          <div class="flex gap-2">
-            <input id="new-username" placeholder="Username" class="w-28 glass-input rounded-md px-3 py-1.5 text-xs text-gray-800 placeholder:text-gray-400">
-            <input id="new-email" placeholder="Email Address" class="w-40 glass-input rounded-md px-3 py-1.5 text-xs text-gray-800 placeholder:text-gray-400">
-            <button onclick="addUser()" class="glass-btn bg-gradient-to-r from-mist-500 to-mist-600 hover:from-mist-400 hover:to-mist-500 text-white text-xs font-bold px-4 py-1.5 rounded-md shadow-md shadow-mist-500/20 active:scale-95">
-              Create
+          <div class="flex items-center justify-between gap-4">
+            <span id="who" class="text-sm font-semibold text-gray-800"></span>
+            <button onclick="logout()" class="text-xs font-bold text-mist-600 hover:text-mist-800 border border-mist-200 rounded-md px-2.5 py-1 bg-white/60">
+              Log out
             </button>
           </div>
-          <p id="user-msg" class="text-[10px] font-medium mt-1 min-h-[14px]"></p>
         </div>
 
       </div>
@@ -286,15 +307,110 @@
 
   <script>
     const API = "/api";
-    let currentUser = 1, currentStock = { id: 0, symbol: '' }, tick = 0, timer = null;
+    let token = localStorage.getItem('token');
+    let currentUser = null, currentStock = { id: 0, symbol: '' }, tick = 0, timer = null;
+    let refreshGen = 0;          // lets an old refresh cycle know it has been replaced
+    let authMode = 'login';
     const $ = id => document.getElementById(id);
+
+    // ---------- API helper: always sends the login token ----------
+    async function api(path, opts = {}) {
+      const headers = Object.assign({}, opts.headers || {});
+      if (token) headers['Authorization'] = 'Bearer ' + token;
+      const res = await fetch(API + path, Object.assign({}, opts, { headers, cache: 'no-store' }));
+      if (res.status === 401 && token && !path.startsWith('/auth/')) {
+        forceLogout('Session expired. Please log in again.');
+        throw new Error('unauthorized');
+      }
+      return res;
+    }
     const get = async path => {
-      const r = await fetch(API + path);
+      const r = await api(path);
       if (!r.ok) throw new Error(path + ' -> ' + r.status);
       return r.json();
     };
 
-    // Analytics Panels configuration
+    // ---------- login / register screen ----------
+    function showAuth(msg) {
+      $('auth-overlay').classList.remove('hidden');
+      $('auth-overlay').classList.add('flex');
+      $('auth-msg').textContent = msg || '';
+      $('auth-username').focus();
+    }
+    function hideAuth() {
+      $('auth-overlay').classList.add('hidden');
+      $('auth-overlay').classList.remove('flex');
+    }
+    function toggleAuthMode() {
+      authMode = authMode === 'login' ? 'register' : 'login';
+      const reg = authMode === 'register';
+      $('auth-email-row').classList.toggle('hidden', !reg);
+      $('auth-submit').textContent = reg ? 'Create account' : 'Log in';
+      $('auth-title').textContent = reg ? 'Create your trading account' : 'Log in to start trading';
+      $('auth-toggle').textContent = reg ? 'Already have an account? Log in' : 'New here? Create an account';
+      $('auth-password').autocomplete = reg ? 'new-password' : 'current-password';
+      $('auth-msg').textContent = '';
+    }
+    async function submitAuth() {
+      const username = $('auth-username').value.trim();
+      const password = $('auth-password').value;
+      const email = $('auth-email').value.trim();
+      const msg = $('auth-msg');
+      if (!username || !password || (authMode === 'register' && !email)) {
+        msg.textContent = 'Fill in all fields.';
+        return;
+      }
+      msg.textContent = 'Please wait...';
+      try {
+        const res = await fetch(`${API}/auth/${authMode}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(authMode === 'register' ? { username, email, password } : { username, password })
+        });
+        let data = {};
+        try { data = await res.json(); } catch (e) { /* not JSON */ }
+        if (!res.ok) {
+          if (typeof data.detail === 'string') {
+            msg.textContent = data.detail;
+          } else if (Array.isArray(data.detail)) {
+            const bad = data.detail.map(d => d.loc && d.loc[d.loc.length - 1]);
+            const parts = [];
+            if (bad.includes('username')) parts.push('Username: 3-50 letters, numbers or _ (no spaces).');
+            if (bad.includes('email')) parts.push('Enter a valid email, like name@example.com.');
+            if (bad.includes('password')) parts.push('Password must be at least 8 characters.');
+            msg.textContent = parts.join(' ') || 'Please check your details.';
+          } else {
+            msg.textContent = 'Server error (' + res.status + '). Check the backend terminal.';
+          }
+          return;
+        }
+        localStorage.setItem('token', data.token);
+        location.reload();            // start fresh as the new user
+      } catch (e) {
+        msg.textContent = 'Cannot reach the server: ' + e.message;
+      }
+    }
+    ['auth-username', 'auth-email', 'auth-password'].forEach(id => {
+      $(id).addEventListener('keydown', e => { if (e.key === 'Enter') submitAuth(); });
+    });
+
+    function forceLogout(message) {
+      localStorage.removeItem('token');
+      token = null;
+      currentUser = null;
+      refreshGen++;                   // stops any running refresh cycle
+      clearTimeout(timer);
+      $('who').textContent = '';
+      $('cash').textContent = '';
+      showAuth(message);
+    }
+    async function logout() {
+      try { await api('/auth/logout', { method: 'POST' }); } catch (e) { /* ignore */ }
+      localStorage.removeItem('token');
+      location.reload();
+    }
+
+    // ---------- analytics panels ----------
     const panels = [
       { id: 'leaderboard', fast: true, title: 'Leaderboard (DENSE_RANK)', url: () => '/leaderboard',
         cols: [['rank','Rank'],['username','Trader'],['total_net_worth','Net worth ₹'],['return_pct','Return %']] },
@@ -446,21 +562,27 @@
     }
 
     async function refresh() {
+      const gen = ++refreshGen;       // newest cycle wins; older ones stop quietly
       try {
-        renderStocks(await get('/stocks'));
+        const stocks = await get('/stocks');
+        if (gen !== refreshGen) return;
+        renderStocks(stocks);
+
         if (currentStock.id) {
           const hist = await get(`/stocks/${currentStock.id}/history`);
+          if (gen !== refreshGen) return;
           chart.data.labels = hist.map(h => {
-             // Extract time portion if it's a full datetime
-             const parts = h.tick_time.split(' ');
-             return parts.length > 1 ? parts[1].substring(0,8) : h.tick_time;
+            const parts = h.tick_time.split(' ');
+            return parts.length > 1 ? parts[1].substring(0,8) : h.tick_time;
           });
           chart.data.datasets[0].data = hist.map(h => h.price);
           chart.update();
         }
+
         for (const p of panels) {
           if (p.fast || tick % 5 === 0) {
             const rows = await get(p.url());
+            if (gen !== refreshGen) return;
             fill(p, rows);
             if (p.id === 'leaderboard') {
               const me = rows.find(r => r.user_id == currentUser);
@@ -470,8 +592,10 @@
         }
         $('status').textContent = '';
       } catch (e) {
-        $('status').textContent = 'Connection Interrupted';
+        if (gen !== refreshGen) return;
+        if (token) $('status').textContent = 'Connection Interrupted';
       }
+      if (gen !== refreshGen) return;
       tick++;
       timer = setTimeout(refresh, 3000);
     }
@@ -486,10 +610,11 @@
       msgEl.className = 'text-[11px] font-bold text-center w-full text-gray-500';
 
       try {
-        const res = await fetch(`${API}/trade/${side}`, {
+        // No user_id is sent: the server uses the account you are logged in as.
+        const res = await api(`/trade/${side}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ user_id: currentUser, stock_id: currentStock.id, quantity: qty })
+          body: JSON.stringify({ stock_id: currentStock.id, quantity: qty })
         });
         const data = await res.json();
         const detail = typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail);
@@ -503,6 +628,7 @@
         
         refreshNow();
       } catch(e) {
+        if (e.message === 'unauthorized') return;
         msgEl.textContent = 'Network Error';
         msgEl.className = 'text-[11px] font-bold text-center w-full text-red-500';
       }
@@ -513,7 +639,7 @@
       pre.textContent = 'Initiating query analysis...';
       pre.classList.add('animate-pulse');
       try {
-        const res = await fetch(`${API}/benchmark/explain`);
+        const res = await api('/benchmark/explain');
         const data = await res.json();
         pre.textContent = res.ok ? data.plan : data.detail;
       } catch (e) {
@@ -523,64 +649,26 @@
       }
     }
 
-    async function loadUsers(selectId) {
-      const users = await get('/users');
-      $('user-select').innerHTML = users.map(u => `<option value="${u.user_id}">${u.username}</option>`).join('');
-      if (selectId) $('user-select').value = selectId;
-    }
-
     async function init() {
+      if (!token) { showAuth(); return; }
       try {
-        await loadUsers();
-        currentUser = parseInt($('user-select').value) || 1;
-        $('user-select').onchange = e => { currentUser = parseInt(e.target.value); refreshNow(); };
-        refresh();
-      } catch(e) {
-        $('status').textContent = 'API Initialisation Failed';
-      }
-    }
-
-    function userMsg(text, ok) {
-      const m = $('user-msg');
-      m.textContent = text;
-      m.className = 'text-[10px] font-bold mt-1 min-h-[14px] ' + (ok ? 'text-green-600' : 'text-red-500');
-    }
-
-    async function addUser() {
-      const username = $('new-username').value.trim();
-      const email = $('new-email').value.trim();
-      if(!username || !email) { userMsg('Fill all fields', false); return; }
-      
-      userMsg('Provisioning...', true);
-      try {
-        const res = await fetch(`${API}/users`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username, email })
-        });
-        let data = {};
-        try { data = await res.json(); } catch (e) { }
-        if (!res.ok) {
-          let text = 'Provisioning failed (' + res.status + ').';
-          if (typeof data.detail === 'string') text = data.detail;
-          else if (Array.isArray(data.detail)) text = 'Validation error. Check format.';
-          userMsg(text, false);
+        const r = await api('/auth/me');
+        if (!r.ok) {
+          localStorage.removeItem('token');
+          token = null;
+          showAuth('Please log in again.');
           return;
         }
-        userMsg(`Success: ${data.username} initialized`, true);
-        $('new-username').value = '';$('new-email').value = '';
-        await loadUsers(data.user_id);
-        currentUser = data.user_id;
-        refreshNow();
+        const me = await r.json();
+        currentUser = me.user_id;
+        $('who').textContent = me.username;
+        hideAuth();
+        refresh();
       } catch (e) {
-        userMsg('API Connection Error', false);
+        if (token) $('status').textContent = 'API Initialisation Failed';
       }
     }
 
-    ['new-username', 'new-email'].forEach(id => {
-      $(id).addEventListener('input', () => userMsg('', true));$(id).addEventListener('keydown', e => { if (e.key === 'Enter') addUser(); });
-    });
-    
     init();
   </script>
 </body>

@@ -1,25 +1,32 @@
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
-import mysql.connector
-
-import os, threading
+import os
+import threading
 from contextlib import asynccontextmanager
+
+import mysql.connector
+from fastapi import Depends, FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
+
+from auth import router as auth_router, current_user
+from db import get_conn
 from simulator_thread import run_simulator
 
 stop_event = threading.Event()
+
+
 @asynccontextmanager
 async def lifespan(app):
     t = threading.Thread(target=run_simulator, args=(stop_event,), daemon=True)
     t.start()
     yield
     stop_event.set()
-from db import get_conn
 
 
 app = FastAPI(title="StockLab DBMS API", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+app.include_router(auth_router)
 
 
 def run_query(sql, params=None):
@@ -34,31 +41,13 @@ def run_query(sql, params=None):
         conn.close()
 
 
-# ---------- basic data (all read from views) ----------
-@app.get("/api/users")
-def users():
-    return run_query("SELECT user_id, username FROM users ORDER BY user_id")
-class NewUser(BaseModel):
-    username: str = Field(min_length=3, max_length=50, pattern=r"^[A-Za-z0-9_]+$")
-    email: str = Field(max_length=100, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+def require_self(user_id: int, user: dict):
+    """A logged-in user may only read their own account data."""
+    if user_id != user["user_id"]:
+        raise HTTPException(status_code=403, detail="Not your account.")
 
 
-@app.post("/api/users")
-def create_user(user: NewUser):
-    conn = get_conn()
-    try:
-        cur = conn.cursor()
-        try:
-            # cash_balance uses the table default of 100000.00
-            cur.execute("INSERT INTO users (username, email) VALUES (%s, %s)",
-                        (user.username, user.email))
-            conn.commit()
-        except mysql.connector.IntegrityError:
-            raise HTTPException(status_code=400, detail="Username or email already exists")
-        return {"user_id": cur.lastrowid, "username": user.username}
-    finally:
-        conn.close()    
-
+# ---------- public market data (safe for everyone to see) ----------
 
 @app.get("/api/stocks")
 def stocks():
@@ -76,19 +65,22 @@ def stock_history(stock_id: int):
     return rows[::-1]          # oldest first, for the chart
 
 
-@app.get("/api/portfolio/{user_id}")
-def portfolio(user_id: int):
-    return run_query("SELECT * FROM portfolio_summary WHERE user_id = %s", (user_id,))
-
-
 @app.get("/api/leaderboard")
 def leaderboard():
     return run_query("SELECT * FROM leaderboard ORDER BY `rank`, username")
 
 
+# ---------- private data: login required, own account only ----------
+
+@app.get("/api/portfolio/{user_id}")
+def portfolio(user_id: int, user=Depends(current_user)):
+    require_self(user_id, user)
+    return run_query("SELECT * FROM portfolio_summary WHERE user_id = %s", (user_id,))
+
+
 # ---------- trading: calls the stored procedures ----------
 class Order(BaseModel):
-    user_id: int
+    user_id: int | None = None      # ignored: the server uses the logged-in user
     stock_id: int
     quantity: int = Field(gt=0)
 
@@ -97,14 +89,14 @@ PROCS = {"buy": "execute_buy_order", "sell": "execute_sell_order"}
 
 
 @app.post("/api/trade/{side}")
-def place_order(side: str, order: Order):
+def place_order(side: str, order: Order, user=Depends(current_user)):
     if side not in PROCS:
         raise HTTPException(status_code=404, detail="Unknown order side")
     conn = get_conn()
     try:
         cur = conn.cursor()
         cur.execute(f"CALL {PROCS[side]}(%s, %s, %s, @status)",
-                    (order.user_id, order.stock_id, order.quantity))
+                    (user["user_id"], order.stock_id, order.quantity))
         cur.execute("SELECT @status")
         status = cur.fetchone()[0]
         if isinstance(status, (bytes, bytearray)):
@@ -159,7 +151,8 @@ def active_traders():
 
 
 @app.get("/api/analytics/sector-exposure/{user_id}")
-def sector_exposure(user_id: int):
+def sector_exposure(user_id: int, user=Depends(current_user)):
+    require_self(user_id, user)
     return run_query(
         f"SELECT * FROM ({EXPOSURE_SQL}) x WHERE user_id = %s ORDER BY exposure_pct DESC",
         (user_id,))
@@ -208,5 +201,8 @@ def explain_demo():
         raise HTTPException(status_code=400, detail=f"Create price_history_bench first (Step 10): {e}")
     finally:
         conn.close()
+
+
+# ---------- frontend (must stay the LAST thing in this file) ----------
 FRONTEND = os.path.join(os.path.dirname(__file__), "..", "frontend")
 app.mount("/", StaticFiles(directory=FRONTEND, html=True), name="frontend")
